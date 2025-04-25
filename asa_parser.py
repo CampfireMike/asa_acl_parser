@@ -1,4 +1,5 @@
 import re
+import sys
 import pandas as pd
 from collections import defaultdict
 
@@ -11,7 +12,7 @@ def parse_asa_acl(config_file_path, output_excel_path):
 
     with open(config_file_path, 'r') as file:
         lines = file.readlines()
-#hehe
+
     # First pass: collect object-group and object definitions
     current_group = None
     group_type = None
@@ -38,8 +39,6 @@ def parse_asa_acl(config_file_path, output_excel_path):
             elif group_type == "network":
                 if line.startswith("host"):
                     object_groups[current_group].append(line.split()[1])
-                elif re.match(r'^\d+\.\d+\.\d+\.\d+', line):
-                    object_groups[current_group].append(line)
                 elif line.startswith("network-object"):
                     tokens = line.split()
                     if tokens[1] == 'host':
@@ -54,7 +53,8 @@ def parse_asa_acl(config_file_path, output_excel_path):
             if line.startswith("host"):
                 object_definitions[current_object] = line.split()[1]
             elif line.startswith("subnet"):
-                object_definitions[current_object] = line.split()[1] + ' ' + line.split()[2]
+                tokens = line.split()
+                object_definitions[current_object] = tokens[1] + ' ' + tokens[2]
             elif line == "exit" or line == "!":
                 current_object = None
         elif current_service_object:
@@ -79,10 +79,12 @@ def parse_asa_acl(config_file_path, output_excel_path):
                     return ['any'], 1
                 elif tokens[0] == 'host':
                     return [tokens[1]], 2
-                elif tokens[0] in object_groups:
-                    return object_groups[tokens[0]], 1
-                elif tokens[0] in object_definitions:
-                    return [object_definitions[tokens[0]]], 1
+                elif tokens[0] == 'object-group':
+                    name = tokens[1]
+                    return object_groups.get(name, [name]), 2
+                elif tokens[0] == 'object':
+                    name = tokens[1]
+                    return [object_definitions.get(name, name)], 2
                 elif re.match(r'^\d+\.\d+\.\d+\.\d+$', tokens[0]):
                     return [tokens[0] + ' ' + tokens[1]], 2
                 else:
@@ -95,10 +97,12 @@ def parse_asa_acl(config_file_path, output_excel_path):
                 tokens = tokens[consumed2:]
 
                 if tokens:
-                    if tokens[0] in service_groups:
-                        service = service_groups[tokens[0]]
-                    elif tokens[0] in service_objects:
-                        service = [service_objects[tokens[0]]]
+                    if tokens[0] == 'object-group' and tokens[1] in service_groups:
+                        service = service_groups[tokens[1]]
+                        tokens = tokens[2:]
+                    elif tokens[0] == 'object' and tokens[1] in service_objects:
+                        service = [service_objects[tokens[1]]]
+                        tokens = tokens[2:]
                     else:
                         service = [" ".join(tokens)]
                 else:
@@ -116,7 +120,11 @@ def parse_asa_acl(config_file_path, output_excel_path):
     df.to_excel(output_excel_path, index=False)
 
 if __name__ == "__main__":
-    config_file_path = "asa_config.txt"
+    if len(sys.argv) != 2:
+        print("Usage: python script.py <asa_config_file>")
+        sys.exit(1)
+
+    config_file_path = sys.argv[1]
     output_excel_path = "access_list.xlsx"
     parse_asa_acl(config_file_path, output_excel_path)
     print(f"Parsed ACL entries saved to {output_excel_path}")

@@ -1,177 +1,107 @@
 import re
-import sys
-import pandas as pd
+import xlwt
 from collections import defaultdict
-from itertools import product
 
-def parse_asa_acl(config_file_path, output_excel_path):
-    data = []
-    network_objects = {}
-    service_objects = {}
-    object_groups = defaultdict(list)
-    service_groups = defaultdict(list)
+# Function to parse the ASA configuration
+def parse_asa_config(config_file):
+    with open(config_file, 'r') as f:
+        config = f.read()
 
-    with open(config_file_path, 'r') as file:
-        lines = [line.strip() for line in file.readlines()]
+    access_lists = defaultdict(list)
+    current_acl_name = None
 
-    # Parse all object and group definitions first
-    current_object = None
-    current_group = None
-    group_type = None
+    # Regular expressions for parsing access-list entries
+    acl_name_pattern = re.compile(r"^access-list (\S+)")
+    acl_entry_pattern = re.compile(r"^\s*(permit|deny)\s+(\S+)\s+(\S+)\s+(\S+)")
+    object_group_pattern = re.compile(r"^object-group (\S+)\s*")
+    object_pattern = re.compile(r"^object (\S+)\s+(\S+)\s+(\S+)")
 
-    for line in lines:
-        if line.startswith('object network'):
-            current_object = line.split()[-1]
-            group_type = 'network'
-        elif line.startswith('object service'):
-            current_object = line.split()[-1]
-            group_type = 'service'
-        elif current_object:
-            if group_type == 'network':
-                if line.startswith('host'):
-                    network_objects[current_object] = [line.split()[1]]
-                elif line.startswith('subnet'):
-                    parts = line.split()
-                    network_objects[current_object] = [f"{parts[1]} {parts[2]}"]
-                elif line.startswith('range'):
-                    parts = line.split()
-                    network_objects[current_object] = [f"{parts[1]}-{parts[2]}"]
-            elif group_type == 'service' and line.startswith('service'):
-                parts = line.split(maxsplit=1)
-                service_objects[current_object] = [parts[1]] if len(parts) > 1 else []
-            if line in ('exit', '!'):
-                current_object = None
+    # Loop through each line in the configuration file
+    for line in config.splitlines():
+        line = line.strip()
 
-        elif line.startswith('object-group network'):
-            current_group = line.split()[-1]
-            group_type = 'network'
-        elif line.startswith('object-group service'):
-            current_group = line.split()[-1]
-            group_type = 'service'
-
-        elif current_group:
-            if line in ('exit', '!'):
-                current_group = None
-            elif group_type == 'network':
-                if line.startswith('host'):
-                    object_groups[current_group].append(line.split()[1])
-                elif line.startswith('network-object object'):
-                    object_name = line.split()[-1]
-                    object_val = network_objects.get(object_name, [object_name])
-                    object_groups[current_group].extend(object_val)
-                elif line.startswith('network-object'):
-                    parts = line.split()
-                    object_groups[current_group].append(" ".join(parts[1:]))
-            elif group_type == 'service':
-                if line.startswith('service-object object'):
-                    object_name = line.split()[-1]
-                    service_groups[current_group].extend(service_objects.get(object_name, [object_name]))
-                elif line.startswith('service-object') or line.startswith('group-object'):
-                    parts = line.split(maxsplit=1)
-                    service_groups[current_group].append(parts[1])
-
-    def resolve_entity(token):
-        if token == 'any':
-            return ['any'], 'any'
-        elif token in object_groups:
-            return ['\n'.join(object_groups[token])], token
-        elif token in network_objects:
-            return ['\n'.join(network_objects[token])], token
-        elif re.match(r'\d+\.\d+\.\d+\.\d+ \d+\.\d+\.\d+\.\d+', token):
-            return [token], token
-        elif re.match(r'\d+\.\d+\.\d+\.\d+', token):
-            return [token], token
-        return [token], token
-
-    def resolve_service(tokens):
-        if not tokens:
-            return [''], ''
-        if tokens[0] in ('object', 'object-group'):
-            obj_name = tokens[1]
-            if tokens[0] == 'object-group':
-                return ['\n'.join(service_groups.get(obj_name, [obj_name]))], obj_name
-            else:
-                return ['\n'.join(service_objects.get(obj_name, [obj_name]))], obj_name
-        elif tokens[0] in ['eq', 'gt', 'lt', 'range', 'neq']:
-            return [" ".join(tokens)], " ".join(tokens)
-        return [" ".join(tokens)], " ".join(tokens)
-
-    acl_pattern = re.compile(r'^access-list\s+(\S+)\s+extended\s+(permit|deny)\s+(\S+)\s+(.*)$')
-
-    for line in lines:
-        match = acl_pattern.match(line)
-        if not match:
+        # Identify access-list name
+        acl_match = acl_name_pattern.match(line)
+        if acl_match:
+            current_acl_name = acl_match.group(1)
             continue
 
-        acl_name, action, protocol, rest = match.groups()
-        tokens = rest.split()
-        idx = 0
+        # Identify ACL entries (permit/deny)
+        acl_entry_match = acl_entry_pattern.match(line)
+        if acl_entry_match:
+            action, source, destination, service = acl_entry_match.groups()
 
-        # Service (optional first)
-        service_ref = ''
-        service_vals = ['']
+            # Resolve object-groups
+            source = resolve_objects(source, config)
+            destination = resolve_objects(destination, config)
+            service = resolve_objects(service, config)
 
-        if tokens[0] in ('object', 'object-group') and (tokens[1] in service_objects or tokens[1] in service_groups):
-            service_vals, service_ref = resolve_service(tokens[0:2])
-            idx += 2
-        elif tokens[0] in ['eq', 'gt', 'lt', 'range', 'neq']:
-            delim_len = 3 if tokens[0] == 'range' else 2
-            service_vals, service_ref = resolve_service(tokens[0:delim_len])
-            idx += delim_len
+            # Add the entry to the access-list
+            access_lists[current_acl_name].append([action, source, destination, service])
 
-        # Source
-        src_token = tokens[idx]
-        idx += 1
-        if src_token in ('object', 'object-group'):
-            src_ref = tokens[idx]
-            src_vals, src_ref = resolve_entity(src_ref)
-            idx += 1
-        elif src_token == 'host':
-            src_ref = tokens[idx]
-            src_vals, src_ref = [src_ref], 'host'
-            idx += 1
-        else:
-            src_vals, src_ref = resolve_entity(src_token)
+        # Object-group processing
+        object_group_match = object_group_pattern.match(line)
+        if object_group_match:
+            group_name = object_group_match.group(1)
+            access_lists[group_name]  # Just to ensure it's created
 
-        # Destination
-        dst_token = tokens[idx]
-        idx += 1
-        if dst_token in ('object', 'object-group'):
-            dst_ref = tokens[idx]
-            dst_vals, dst_ref = resolve_entity(dst_ref)
-            idx += 1
-        elif dst_token == 'host':
-            dst_ref = tokens[idx]
-            dst_vals, dst_ref = [dst_ref], 'host'
-            idx += 1
-        else:
-            dst_vals, dst_ref = resolve_entity(dst_token)
+        # Handle object definitions
+        object_match = object_pattern.match(line)
+        if object_match:
+            object_name, object_type, value = object_match.groups()
+            access_lists[object_name].append(value)
 
-        # Service after dst (fallback)
-        remaining_tokens = tokens[idx:]
-        if remaining_tokens:
-            service_vals, service_ref = resolve_service(remaining_tokens)
+    return access_lists
 
-        for src, dst, svc in product(src_vals, dst_vals, service_vals):
-            data.append({
-                'ACL Name': acl_name,
-                'Source Object/Group': src_ref,
-                'Source': src,
-                'Destination Object/Group': dst_ref,
-                'Destination': dst,
-                'Service Object/Group': service_ref,
-                'Destination Service': svc
-            })
+# Function to resolve objects or object-groups into their actual values
+def resolve_objects(identifier, config):
+    # If it's an object or group, expand it
+    if identifier.startswith("obj_") or identifier.startswith("group"):
+        expanded_values = []
+        object_match = re.compile(r"^object (\S+)\s+(\S+)\s+(\S+)")
+        for line in config.splitlines():
+            if object_match.match(line.strip()):
+                expanded_values.append(line.strip())
+        return '\n'.join(expanded_values)
+    return identifier
 
-    df = pd.DataFrame(data)
-    df.to_excel(output_excel_path, index=False)
+# Function to create Excel file
+def create_excel(access_lists, output_file):
+    # Initialize Excel workbook
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet('Access List')
 
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python script.py <asa_config_file>")
-        sys.exit(1)
+    # Set up column headers
+    headers = ['Access List', 'Source', 'Destination', 'Service']
+    for col_num, header in enumerate(headers):
+        ws.write(0, col_num, header)
 
-    config_file_path = sys.argv[1]
-    output_excel_path = "access_list.xlsx"
-    parse_asa_acl(config_file_path, output_excel_path)
-    print(f"Parsed ACL entries saved to {output_excel_path}")
+    row = 1
+    # Write each access list entry to the spreadsheet
+    for acl_name, entries in access_lists.items():
+        for entry in entries:
+            source, destination, service = entry[1], entry[2], entry[3]
+            # Write ACL name and other fields
+            ws.write(row, 0, acl_name)
+            ws.write(row, 1, source)
+            ws.write(row, 2, destination)
+            ws.write(row, 3, service)
+            row += 1
+
+    # Save the Excel file
+    wb.save(output_file)
+
+# Main function to parse the config and generate the Excel
+def main():
+    config_file = 'asa_config.txt'  # Specify the path to the ASA configuration file
+    output_file = 'access_list.xlsx'  # Specify the output Excel file path
+
+    # Parse the ASA configuration file
+    access_lists = parse_asa_config(config_file)
+
+    # Create an Excel file with the parsed data
+    create_excel(access_lists, output_file)
+
+# Run the main function
+if __name__ == '__main__':
+    main()

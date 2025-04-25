@@ -1,5 +1,6 @@
 import re
 import xlwt
+import sys
 from collections import defaultdict
 
 # Function to parse the ASA configuration
@@ -93,7 +94,11 @@ def create_excel(access_lists, output_file):
 
 # Main function to parse the config and generate the Excel
 def main():
-    config_file = 'asa_config.txt'  # Specify the path to the ASA configuration file
+    if len(sys.argv) != 2:
+        print("Usage: python script_name.py <input_config_file>")
+        sys.exit(1)
+
+    config_file = sys.argv[1]  # Get the input file from command-line argument
     output_file = 'access_list.xlsx'  # Specify the output Excel file path
 
     # Parse the ASA configuration file

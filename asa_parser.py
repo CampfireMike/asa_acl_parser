@@ -74,9 +74,11 @@ def parse_asa_acl(config_file_path, output_excel_path):
         if token == 'any':
             return ['any'], 'any'
         elif token in object_groups:
-            return object_groups[token], token
+            return ['\n'.join(object_groups[token])], token
         elif token in network_objects:
-            return network_objects[token], token
+            return ['\n'.join(network_objects[token])], token
+        elif re.match(r'\d+\.\d+\.\d+\.\d+ \d+\.\d+\.\d+\.\d+', token):
+            return [token], token
         elif re.match(r'\d+\.\d+\.\d+\.\d+', token):
             return [token], token
         return [token], token
@@ -87,9 +89,9 @@ def parse_asa_acl(config_file_path, output_excel_path):
         if tokens[0] in ('object', 'object-group'):
             obj_name = tokens[1]
             if tokens[0] == 'object-group':
-                return service_groups.get(obj_name, [obj_name]), obj_name
+                return ['\n'.join(service_groups.get(obj_name, [obj_name]))], obj_name
             else:
-                return service_objects.get(obj_name, [obj_name]), obj_name
+                return ['\n'.join(service_objects.get(obj_name, [obj_name]))], obj_name
         elif tokens[0] in ['eq', 'gt', 'lt', 'range', 'neq']:
             return [" ".join(tokens)], " ".join(tokens)
         return [" ".join(tokens)], " ".join(tokens)

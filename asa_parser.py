@@ -33,6 +33,9 @@ def parse_asa_acl(config_file_path, output_excel_path):
                 elif line.startswith('subnet'):
                     parts = line.split()
                     network_objects[current_object] = [f"{parts[1]} {parts[2]}"]
+                elif line.startswith('range'):
+                    parts = line.split()
+                    network_objects[current_object] = [f"{parts[1]}-{parts[2]}"]
             elif group_type == 'service' and line.startswith('service'):
                 parts = line.split(maxsplit=1)
                 service_objects[current_object] = [parts[1]] if len(parts) > 1 else []
@@ -52,14 +55,20 @@ def parse_asa_acl(config_file_path, output_excel_path):
             elif group_type == 'network':
                 if line.startswith('host'):
                     object_groups[current_group].append(line.split()[1])
+                elif line.startswith('network-object object'):
+                    object_name = line.split()[-1]
+                    object_val = network_objects.get(object_name, [object_name])
+                    object_groups[current_group].extend(object_val)
                 elif line.startswith('network-object'):
                     parts = line.split()
-                    if parts[1] == 'host':
-                        object_groups[current_group].append(parts[2])
-                    else:
-                        object_groups[current_group].append(" ".join(parts[1:]))
+                    object_groups[current_group].append(" ".join(parts[1:]))
             elif group_type == 'service':
-                service_groups[current_group].append(line)
+                if line.startswith('service-object object'):
+                    object_name = line.split()[-1]
+                    service_groups[current_group].extend(service_objects.get(object_name, [object_name]))
+                elif line.startswith('service-object') or line.startswith('group-object'):
+                    parts = line.split(maxsplit=1)
+                    service_groups[current_group].append(parts[1])
 
     def resolve_entity(token):
         if token == 'any':
@@ -68,7 +77,7 @@ def parse_asa_acl(config_file_path, output_excel_path):
             return object_groups[token], token
         elif token in network_objects:
             return network_objects[token], token
-        elif re.match(r'^\d+\.\d+\.\d+\.\d+$', token):
+        elif re.match(r'\d+\.\d+\.\d+\.\d+', token):
             return [token], token
         return [token], token
 
@@ -96,17 +105,17 @@ def parse_asa_acl(config_file_path, output_excel_path):
         tokens = rest.split()
         idx = 0
 
-        # Service may appear first
+        # Service (optional first)
         service_ref = ''
-        service_tokens = []
-        if tokens[0] in ('object', 'object-group') and tokens[1] in service_objects or tokens[1] in service_groups:
-            service_tokens = tokens[0:2]
+        service_vals = ['']
+
+        if tokens[0] in ('object', 'object-group') and (tokens[1] in service_objects or tokens[1] in service_groups):
+            service_vals, service_ref = resolve_service(tokens[0:2])
             idx += 2
         elif tokens[0] in ['eq', 'gt', 'lt', 'range', 'neq']:
-            service_tokens = tokens[0:3] if len(tokens) > 2 else tokens[0:2]
-            idx += len(service_tokens)
-
-        service_vals, service_ref = resolve_service(service_tokens)
+            delim_len = 3 if tokens[0] == 'range' else 2
+            service_vals, service_ref = resolve_service(tokens[0:delim_len])
+            idx += delim_len
 
         # Source
         src_token = tokens[idx]
@@ -135,6 +144,11 @@ def parse_asa_acl(config_file_path, output_excel_path):
             idx += 1
         else:
             dst_vals, dst_ref = resolve_entity(dst_token)
+
+        # Service after dst (fallback)
+        remaining_tokens = tokens[idx:]
+        if remaining_tokens:
+            service_vals, service_ref = resolve_service(remaining_tokens)
 
         for src, dst, svc in product(src_vals, dst_vals, service_vals):
             data.append({

@@ -61,7 +61,6 @@ def parse_asa_acl(config_file_path, output_excel_path):
             elif group_type == 'service':
                 service_groups[current_group].append(line)
 
-    # Helper to expand object/entity
     def resolve_entity(token_type, token):
         if token_type == 'any':
             return ['any'], 'any'
@@ -71,7 +70,7 @@ def parse_asa_acl(config_file_path, output_excel_path):
             return object_groups.get(token, [token]), token
         elif token_type == 'object':
             return network_objects.get(token, [token]), token
-        elif re.match(r'^\d+\.\d+\.\d+\.\d+$', token):
+        elif re.match(r'\d+\.\d+\.\d+\.\d+', token):
             return [token], token
         return [token], token
 
@@ -80,7 +79,9 @@ def parse_asa_acl(config_file_path, output_excel_path):
             return service_groups.get(token, [token]), token
         elif token_type == 'object':
             return service_objects.get(token, [token]), token
-        return [token], token
+        elif token_type in ['eq', 'gt', 'lt', 'range', 'neq']:
+            return [" ".join([token] + token.split()[1:])], token
+        return [" ".join([token_type, token])], token_type
 
     acl_pattern = re.compile(r'^access-list\s+(\S+)\s+extended\s+(permit|deny)\s+(\S+)\s+(.*)$')
 
@@ -110,7 +111,7 @@ def parse_asa_acl(config_file_path, output_excel_path):
             tokens = tokens[consumed:]
             if tokens:
                 svc_type = tokens[0]
-                svc_token = tokens[1] if svc_type in ('object', 'object-group') else svc_type
+                svc_token = tokens[1] if len(tokens) > 1 else ''
                 svc_items, svc_ref = resolve_service(svc_type, svc_token)
             else:
                 svc_items, svc_ref = [''], ''

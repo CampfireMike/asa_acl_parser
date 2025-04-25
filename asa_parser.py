@@ -6,13 +6,17 @@ def parse_asa_acl(config_file_path, output_excel_path):
     data = []
     object_groups = defaultdict(list)
     service_groups = defaultdict(list)
+    object_definitions = {}
+    service_objects = {}
 
     with open(config_file_path, 'r') as file:
         lines = file.readlines()
 
-    # First pass: collect object-group definitions
+    # First pass: collect object-group and object definitions
     current_group = None
     group_type = None
+    current_object = None
+    current_service_object = None
     for line in lines:
         line = line.strip()
 
@@ -23,6 +27,10 @@ def parse_asa_acl(config_file_path, output_excel_path):
             parts = line.split()
             current_group = parts[2]
             group_type = "service"
+        elif line.startswith("object network"):
+            current_object = line.split()[-1]
+        elif line.startswith("object service"):
+            current_service_object = line.split()[-1]
         elif current_group:
             if line.startswith("object-group") or line == "exit" or line == "!":
                 current_group = None
@@ -42,6 +50,19 @@ def parse_asa_acl(config_file_path, output_excel_path):
                 tokens = line.split()
                 if tokens:
                     service_groups[current_group].append(" ".join(tokens))
+        elif current_object:
+            if line.startswith("host"):
+                object_definitions[current_object] = line.split()[1]
+            elif line.startswith("subnet"):
+                object_definitions[current_object] = line.split()[1] + ' ' + line.split()[2]
+            elif line == "exit" or line == "!":
+                current_object = None
+        elif current_service_object:
+            if line.startswith("service"):
+                tokens = line.split()
+                service_objects[current_service_object] = " ".join(tokens[1:])
+            elif line == "exit" or line == "!":
+                current_service_object = None
 
     # Second pass: parse access-lists
     acl_pattern = re.compile(r'^access-list\s+(\S+)\s+extended\s+(permit|deny)\s+(\S+)\s+(.+)$')
@@ -60,6 +81,8 @@ def parse_asa_acl(config_file_path, output_excel_path):
                     return [tokens[1]], 2
                 elif tokens[0] in object_groups:
                     return object_groups[tokens[0]], 1
+                elif tokens[0] in object_definitions:
+                    return [object_definitions[tokens[0]]], 1
                 elif re.match(r'^\d+\.\d+\.\d+\.\d+$', tokens[0]):
                     return [tokens[0] + ' ' + tokens[1]], 2
                 else:
@@ -71,10 +94,15 @@ def parse_asa_acl(config_file_path, output_excel_path):
                 dst, consumed2 = parse_entity(tokens)
                 tokens = tokens[consumed2:]
 
-                if tokens and tokens[0] in service_groups:
-                    service = service_groups[tokens[0]]
+                if tokens:
+                    if tokens[0] in service_groups:
+                        service = service_groups[tokens[0]]
+                    elif tokens[0] in service_objects:
+                        service = [service_objects[tokens[0]]]
+                    else:
+                        service = [" ".join(tokens)]
                 else:
-                    service = [" ".join(tokens)] if tokens else ['']
+                    service = ['']
 
                 data.append({
                     'Source': ", ".join(src),

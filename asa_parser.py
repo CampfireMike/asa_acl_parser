@@ -2,6 +2,7 @@ import re
 import sys
 import pandas as pd
 from collections import defaultdict
+import itertools
 
 def parse_asa_acl(config_file_path, output_excel_path):
     data = []
@@ -108,11 +109,13 @@ def parse_asa_acl(config_file_path, output_excel_path):
                 else:
                     service = ['']
 
-                data.append({
-                    'Source': ", ".join(src),
-                    'Destination': ", ".join(dst),
-                    'Destination Service': ", ".join(service)
-                })
+                # Output every combination on a separate row
+                for s, d, sv in itertools.product(src, dst, service):
+                    data.append({
+                        'Source': s,
+                        'Destination': d,
+                        'Destination Service': sv
+                    })
             except Exception as e:
                 print(f"Error parsing line: {line}\n{e}")
 

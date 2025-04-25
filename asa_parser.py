@@ -1,140 +1,94 @@
 import re
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
+import pandas as pd
+from collections import defaultdict
 
-object_groups = {}
-service_groups = {}
+def parse_asa_acl(config_file_path, output_excel_path):
+    data = []
+    object_groups = defaultdict(list)
+    service_groups = defaultdict(list)
 
-def parse_object_groups(lines):
-    current_group = ""
-    is_service = False
+    with open(config_file_path, 'r') as file:
+        lines = file.readlines()
+
+    # First pass: collect object-group definitions
+    current_group = None
+    group_type = None
+    for line in lines:
+        line = line.strip()
+
+        if line.startswith("object-group network"):
+            current_group = line.split()[-1]
+            group_type = "network"
+        elif line.startswith("object-group service"):
+            parts = line.split()
+            current_group = parts[2]
+            group_type = "service"
+        elif current_group:
+            if line.startswith("object-group") or line == "exit" or line == "!":
+                current_group = None
+                group_type = None
+            elif group_type == "network":
+                if line.startswith("host"):
+                    object_groups[current_group].append(line.split()[1])
+                elif re.match(r'^\d+\.\d+\.\d+\.\d+', line):
+                    object_groups[current_group].append(line)
+                elif line.startswith("network-object"):
+                    tokens = line.split()
+                    if tokens[1] == 'host':
+                        object_groups[current_group].append(tokens[2])
+                    else:
+                        object_groups[current_group].append(" ".join(tokens[1:]))
+            elif group_type == "service":
+                tokens = line.split()
+                if tokens:
+                    service_groups[current_group].append(" ".join(tokens))
+
+    # Second pass: parse access-lists
+    acl_pattern = re.compile(r'^access-list\s+(\S+)\s+extended\s+(permit|deny)\s+(\S+)\s+(.+)$')
 
     for line in lines:
         line = line.strip()
-        if line.startswith("object-group network "):
-            current_group = line.split()[2]
-            is_service = False
-            object_groups[current_group] = []
-        elif line.startswith("object-group service "):
-            current_group = line.split()[2]
-            is_service = True
-            service_groups[current_group] = []
-        elif line.startswith("group-object "):
-            group_name = line.split()[1]
-            target = service_groups if is_service else object_groups
-            target[current_group].append(f"group:{group_name}")
-        elif line.startswith("network-object") or line.startswith("service-object"):
-            item = " ".join(line.split()[1:])
-            target = service_groups if is_service else object_groups
-            target[current_group].append(item)
+        match = acl_pattern.match(line)
+        if match:
+            acl_name, action, protocol, rest = match.groups()
+            tokens = rest.split()
 
-def resolve_group(name, is_service=False):
-    result = []
-    visited = set()
-    stack = [name]
-    groups = service_groups if is_service else object_groups
+            def parse_entity(tokens):
+                if tokens[0] == 'any':
+                    return ['any'], 1
+                elif tokens[0] == 'host':
+                    return [tokens[1]], 2
+                elif tokens[0] in object_groups:
+                    return object_groups[tokens[0]], 1
+                elif re.match(r'^\d+\.\d+\.\d+\.\d+$', tokens[0]):
+                    return [tokens[0] + ' ' + tokens[1]], 2
+                else:
+                    return [tokens[0]], 1
 
-    while stack:
-        group = stack.pop()
-        if group in visited:
-            continue
-        visited.add(group)
-        for item in groups.get(group, []):
-            if item.startswith("group:"):
-                stack.append(item.split(":", 1)[1])
-            else:
-                result.append(item)
-    return result
+            try:
+                src, consumed1 = parse_entity(tokens)
+                tokens = tokens[consumed1:]
+                dst, consumed2 = parse_entity(tokens)
+                tokens = tokens[consumed2:]
 
-def resolve_token(token, is_service=False):
-    if token == "any":
-        return ["any"]
-    elif token.startswith("object-group") or token.startswith("object"):
-        name = token.split()[-1]
-        return resolve_group(name, is_service)
-    else:
-        return [token]
+                if tokens and tokens[0] in service_groups:
+                    service = service_groups[tokens[0]]
+                else:
+                    service = [" ".join(tokens)] if tokens else ['']
 
-def get_group_name(token):
-    if token.startswith("object-group") or token.startswith("object"):
-        return token.split()[-1]
-    return ""
+                data.append({
+                    'Source': ", ".join(src),
+                    'Destination': ", ".join(dst),
+                    'Destination Service': ", ".join(service)
+                })
+            except Exception as e:
+                print(f"Error parsing line: {line}\n{e}")
 
-def parse_access_lists(lines):
-    data = []
-    for line in lines:
-        if not line.startswith("access-list"):
-            continue
-
-        parts = re.split(r"\s+", line)
-        if len(parts) < 11:
-            continue
-
-        acl_name = parts[1]
-        service = parts[6]
-        source = parts[8]
-        destination = parts[10]
-
-        src_group = get_group_name(source)
-        dst_group = get_group_name(destination)
-        srv_group = get_group_name(service)
-
-        src_contents = "\n".join(resolve_group(src_group, False)) if src_group else ""
-        dst_contents = "\n".join(resolve_group(dst_group, False)) if dst_group else ""
-        srv_contents = "\n".join(resolve_group(srv_group, True)) if srv_group else ""
-
-        for s in resolve_token(source, False):
-            for d in resolve_token(destination, False):
-                for srv in resolve_token(service, True):
-                    data.append([
-                        acl_name, s, d, srv,
-                        src_group, src_contents,
-                        dst_group, dst_contents,
-                        srv_group, srv_contents
-                    ])
-    return data
-
-def write_to_excel(data, output_path):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "AccessLists"
-
-    headers = [
-        "access-list", "source", "destination", "service",
-        "source-group-name", "source-group-contents",
-        "destination-group-name", "destination-group-contents",
-        "service-group-name", "service-group-contents"
-    ]
-
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-
-    for row in data:
-        ws.append(row)
-
-    # Wrap text for group contents
-    for row in ws.iter_rows(min_row=2, min_col=6, max_col=10):
-        for cell in row:
-            cell.alignment = Alignment(wrap_text=True)
-
-    for column_cells in ws.columns:
-        max_length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
-        ws.column_dimensions[column_cells[0].column_letter].width = max_length + 2
-
-    wb.save(output_path)
-    print(f"Saved Excel file to {output_path}")
-
-def main():
-    config_path = "asa_config.txt"
-    output_path = "access_list_output.xlsx"
-
-    with open(config_path, "r") as file:
-        lines = file.readlines()
-
-    parse_object_groups(lines)
-    access_data = parse_access_lists(lines)
-    write_to_excel(access_data, output_path)
+    df = pd.DataFrame(data)
+    df.to_excel(output_excel_path, index=False)
 
 if __name__ == "__main__":
-    main()
+    config_file_path = "asa_config.txt"
+    output_excel_path = "access_list.xlsx"
+    parse_asa_acl(config_file_path, output_excel_path)
+    print(f"Parsed ACL entries saved to {output_excel_path}")

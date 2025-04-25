@@ -11,7 +11,7 @@ def parse_asa_acl(config_file_path, output_excel_path):
 
     with open(config_file_path, 'r') as file:
         lines = file.readlines()
-
+#hehe
     # First pass: collect object-group and object definitions
     current_group = None
     group_type = None

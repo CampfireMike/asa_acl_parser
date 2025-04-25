@@ -64,23 +64,23 @@ def parse_asa_acl(config_file_path, output_excel_path):
     # Helper to expand object/entity
     def resolve_entity(token_type, token):
         if token_type == 'any':
-            return ['any']
+            return ['any'], 'any'
         elif token_type == 'host':
-            return [token]
+            return [token], 'host'
         elif token_type == 'object-group':
-            return object_groups.get(token, [token])
+            return object_groups.get(token, [token]), token
         elif token_type == 'object':
-            return network_objects.get(token, [token])
+            return network_objects.get(token, [token]), token
         elif re.match(r'^\d+\.\d+\.\d+\.\d+$', token):
-            return [token]
-        return [token]
+            return [token], token
+        return [token], token
 
     def resolve_service(token_type, token):
         if token_type == 'object-group':
-            return service_groups.get(token, [token])
+            return service_groups.get(token, [token]), token
         elif token_type == 'object':
-            return service_objects.get(token, [token])
-        return [token]
+            return service_objects.get(token, [token]), token
+        return [token], token
 
     acl_pattern = re.compile(r'^access-list\s+(\S+)\s+extended\s+(permit|deny)\s+(\S+)\s+(.*)$')
 
@@ -89,21 +89,21 @@ def parse_asa_acl(config_file_path, output_excel_path):
         if not match:
             continue
 
-        _, action, protocol, rest = match.groups()
+        acl_name, action, protocol, rest = match.groups()
         tokens = rest.split()
 
         try:
             # Parse source
             src_type = tokens[0]
             src_token = tokens[1] if src_type in ('object', 'object-group') else tokens[0]
-            src_items = resolve_entity(src_type, src_token)
+            src_items, src_ref = resolve_entity(src_type, src_token)
             consumed = 2 if src_type in ('object', 'object-group') else 1
 
             # Parse destination
             tokens = tokens[consumed:]
             dst_type = tokens[0]
             dst_token = tokens[1] if dst_type in ('object', 'object-group') else tokens[0]
-            dst_items = resolve_entity(dst_type, dst_token)
+            dst_items, dst_ref = resolve_entity(dst_type, dst_token)
             consumed = 2 if dst_type in ('object', 'object-group') else 1
 
             # Parse service
@@ -111,14 +111,18 @@ def parse_asa_acl(config_file_path, output_excel_path):
             if tokens:
                 svc_type = tokens[0]
                 svc_token = tokens[1] if svc_type in ('object', 'object-group') else svc_type
-                svc_items = resolve_service(svc_type, svc_token)
+                svc_items, svc_ref = resolve_service(svc_type, svc_token)
             else:
-                svc_items = ['']
+                svc_items, svc_ref = [''], ''
 
             for src, dst, svc in product(src_items, dst_items, svc_items):
                 data.append({
+                    'ACL Name': acl_name,
+                    'Source Object/Group': src_ref,
                     'Source': src,
+                    'Destination Object/Group': dst_ref,
                     'Destination': dst,
+                    'Service Object/Group': svc_ref,
                     'Destination Service': svc
                 })
 

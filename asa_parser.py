@@ -1,112 +1,118 @@
 import re
-import xlwt
-import sys
-from collections import defaultdict
+import openpyxl
+from openpyxl import Workbook
+import argparse
+import os
 
-# Function to parse the ASA configuration
+# Function to parse the object/group names and their contents
+def parse_object_group(obj_name, config):
+    obj_contents = []
+    pattern = re.compile(
+        rf"(object-group|object) (network|service) {re.escape(obj_name)}\n((?: .*\n)*)",
+        re.IGNORECASE
+    )
+    match = pattern.search(config)
+    if match:
+        lines = match.group(3).strip().splitlines()
+        for line in lines:
+            obj_contents.append(line.strip())
+    return obj_contents
+
+# Function to parse a single line in the access-list
+def parse_acl_line(line, config):
+    acl_data = {}
+
+    # Access-list name
+    acl_name_match = re.match(r"access-list (\S+)", line)
+    acl_data['Access-List'] = acl_name_match.group(1) if acl_name_match else ""
+
+    tokens = line.split()
+    try:
+        # Typically: access-list NAME extended permit tcp SRC DST EQ PORT
+        src_index = tokens.index("extended") + 3
+        src = tokens[src_index]
+        dst = tokens[src_index + 1]
+        svc = ' '.join(tokens[src_index + 2:]) if len(tokens) > src_index + 2 else ""
+
+        # Source
+        if src.startswith("object-group") or src.startswith("object"):
+            obj_name = tokens[src_index + 1]
+            acl_data['Source Object'] = obj_name
+            acl_data['Source Object Details'] = ', '.join(parse_object_group(obj_name, config))
+        else:
+            acl_data['Source IP/Subnet'] = src
+
+        # Destination
+        if dst.startswith("object-group") or dst.startswith("object"):
+            dst_obj_index = src_index + 3 if 'object' in src else src_index + 2
+            obj_name = tokens[dst_obj_index]
+            acl_data['Destination Object'] = obj_name
+            acl_data['Destination Object Details'] = ', '.join(parse_object_group(obj_name, config))
+        else:
+            acl_data['Destination IP/Subnet'] = dst
+
+        # Service
+        acl_data['Service Port'] = svc
+
+    except (ValueError, IndexError):
+        # Could not parse as expected
+        pass
+
+    return acl_data
+
+# Function to parse the entire Cisco ASA config
 def parse_asa_config(config_file):
     with open(config_file, 'r') as f:
         config = f.read()
 
-    access_lists = defaultdict(list)
-    current_acl_name = None
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Access Lists"
 
-    # Regular expressions for parsing access-list entries
-    acl_name_pattern = re.compile(r"^access-list (\S+)")
-    acl_entry_pattern = re.compile(r"^\s*(permit|deny)\s+(\S+)\s+(\S+)\s+(\S+)")
-    object_group_pattern = re.compile(r"^object-group (\S+)\s*")
-    object_pattern = re.compile(r"^object (\S+)\s+(\S+)\s+(\S+)")
+    headers = [
+        'Access-List',
+        'Source IP/Subnet',
+        'Destination IP/Subnet',
+        'Service Port',
+        'Source Object',
+        'Source Object Details',
+        'Destination Object',
+        'Destination Object Details'
+    ]
+    ws.append(headers)
 
-    # Loop through each line in the configuration file
-    for line in config.splitlines():
-        line = line.strip()
+    # Parse all access-list lines
+    acl_lines = [line for line in config.splitlines() if line.strip().startswith("access-list")]
+    for line in acl_lines:
+        acl_data = parse_acl_line(line.strip(), config)
+        ws.append([
+            acl_data.get('Access-List', ''),
+            acl_data.get('Source IP/Subnet', ''),
+            acl_data.get('Destination IP/Subnet', ''),
+            acl_data.get('Service Port', ''),
+            acl_data.get('Source Object', ''),
+            acl_data.get('Source Object Details', ''),
+            acl_data.get('Destination Object', ''),
+            acl_data.get('Destination Object Details', ''),
+        ])
 
-        # Identify access-list name
-        acl_match = acl_name_pattern.match(line)
-        if acl_match:
-            current_acl_name = acl_match.group(1)
-            continue
-
-        # Identify ACL entries (permit/deny)
-        acl_entry_match = acl_entry_pattern.match(line)
-        if acl_entry_match:
-            action, source, destination, service = acl_entry_match.groups()
-
-            # Resolve object-groups
-            source = resolve_objects(source, config)
-            destination = resolve_objects(destination, config)
-            service = resolve_objects(service, config)
-
-            # Add the entry to the access-list
-            access_lists[current_acl_name].append([action, source, destination, service])
-
-        # Object-group processing
-        object_group_match = object_group_pattern.match(line)
-        if object_group_match:
-            group_name = object_group_match.group(1)
-            access_lists[group_name]  # Just to ensure it's created
-
-        # Handle object definitions
-        object_match = object_pattern.match(line)
-        if object_match:
-            object_name, object_type, value = object_match.groups()
-            access_lists[object_name].append(value)
-
-    return access_lists
-
-# Function to resolve objects or object-groups into their actual values
-def resolve_objects(identifier, config):
-    # If it's an object or group, expand it
-    if identifier.startswith("obj_") or identifier.startswith("group"):
-        expanded_values = []
-        object_match = re.compile(r"^object (\S+)\s+(\S+)\s+(\S+)")
-        for line in config.splitlines():
-            if object_match.match(line.strip()):
-                expanded_values.append(line.strip())
-        return '\n'.join(expanded_values)
-    return identifier
-
-# Function to create Excel file
-def create_excel(access_lists, output_file):
-    # Initialize Excel workbook
-    wb = xlwt.Workbook()
-    ws = wb.add_sheet('Access List')
-
-    # Set up column headers
-    headers = ['Access List', 'Source', 'Destination', 'Service']
-    for col_num, header in enumerate(headers):
-        ws.write(0, col_num, header)
-
-    row = 1
-    # Write each access list entry to the spreadsheet
-    for acl_name, entries in access_lists.items():
-        for entry in entries:
-            source, destination, service = entry[1], entry[2], entry[3]
-            # Write ACL name and other fields
-            ws.write(row, 0, acl_name)
-            ws.write(row, 1, source)
-            ws.write(row, 2, destination)
-            ws.write(row, 3, service)
-            row += 1
-
-    # Save the Excel file
+    # Save Excel
+    base_name = os.path.splitext(os.path.basename(config_file))[0]
+    output_file = f"{base_name}_parsed_acl.xlsx"
     wb.save(output_file)
+    print(f"Parsing complete! Excel file '{output_file}' created.")
 
-# Main function to parse the config and generate the Excel
+# Main function with CLI
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python script_name.py <input_config_file>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Parse Cisco ASA ACL config into Excel.")
+    parser.add_argument("filename", help="Path to ASA config file")
+    args = parser.parse_args()
 
-    config_file = sys.argv[1]  # Get the input file from command-line argument
-    output_file = 'access_list.xlsx'  # Specify the output Excel file path
+    if not os.path.isfile(args.filename):
+        print(f"Error: File '{args.filename}' does not exist.")
+        return
 
-    # Parse the ASA configuration file
-    access_lists = parse_asa_config(config_file)
+    parse_asa_config(args.filename)
 
-    # Create an Excel file with the parsed data
-    create_excel(access_lists, output_file)
-
-# Run the main function
 if __name__ == '__main__':
     main()

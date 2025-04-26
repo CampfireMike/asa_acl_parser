@@ -1,118 +1,194 @@
 import re
-import openpyxl
-from openpyxl import Workbook
 import argparse
 import os
+from openpyxl import Workbook
 
-# Function to parse the object/group names and their contents
-def parse_object_group(obj_name, config):
-    obj_contents = []
-    pattern = re.compile(
-        rf"(object-group|object) (network|service) {re.escape(obj_name)}\n((?: .*\n)*)",
-        re.IGNORECASE
-    )
-    match = pattern.search(config)
-    if match:
-        lines = match.group(3).strip().splitlines()
-        for line in lines:
-            obj_contents.append(line.strip())
-    return obj_contents
 
-# Function to parse a single line in the access-list
-def parse_acl_line(line, config):
-    acl_data = {}
+def parse_network_object_groups(config):
+    object_groups = {}
+    current_group = None
+    collecting = False
 
-    # Access-list name
-    acl_name_match = re.match(r"access-list (\S+)", line)
-    acl_data['Access-List'] = acl_name_match.group(1) if acl_name_match else ""
+    lines = config.splitlines()
+    for line in lines:
+        line = line.strip()
+        if line.startswith("object-group network"):
+            current_group = line.split()[-1]
+            object_groups[current_group] = []
+            collecting = True
+        elif collecting:
+            if line.startswith("network-object"):
+                parts = line.split()
+                if "host" in parts:
+                    ip = parts[-1] + "/32"
+                else:
+                    ip = f"{parts[1]}/{mask_to_cidr(parts[2])}"
+                object_groups[current_group].append(ip)
+            elif line.startswith("group-object"):
+                object_groups[current_group].append("GROUP:" + line.split()[-1])
+            elif line.startswith("object-group") or line.startswith("object") or line == "":
+                collecting = False
 
-    tokens = line.split()
+    return object_groups
+
+
+def parse_service_object_groups(config):
+    service_groups = {}
+    current_group = None
+    collecting = False
+
+    lines = config.splitlines()
+    for line in lines:
+        line = line.strip()
+        if line.startswith("object-group service"):
+            current_group = line.split()[2]
+            service_groups[current_group] = []
+            collecting = True
+        elif collecting:
+            if line.startswith("port-object"):
+                parts = line.split()
+                if parts[1] == "range":
+                    ports = f"{parts[2]}-{parts[3]}"
+                else:
+                    ports = parts[1]
+                service_groups[current_group].append(ports)
+            elif line.startswith("group-object"):
+                service_groups[current_group].append("GROUP:" + line.split()[-1])
+            elif line.startswith("object-group") or line == "":
+                collecting = False
+
+    return service_groups
+
+
+def mask_to_cidr(mask):
+    return sum(bin(int(x)).count('1') for x in mask.split('.'))
+
+
+def parse_acl_line(line, net_objects, svc_objects):
+    tokens = line.strip().split()
+    acl_name = tokens[1]
     try:
-        # Typically: access-list NAME extended permit tcp SRC DST EQ PORT
-        src_index = tokens.index("extended") + 3
-        src = tokens[src_index]
-        dst = tokens[src_index + 1]
-        svc = ' '.join(tokens[src_index + 2:]) if len(tokens) > src_index + 2 else ""
+        action_index = tokens.index("extended") + 1
+        action = tokens[action_index]
+        protocol = tokens[action_index + 1]
 
-        # Source
-        if src.startswith("object-group") or src.startswith("object"):
-            obj_name = tokens[src_index + 1]
-            acl_data['Source Object'] = obj_name
-            acl_data['Source Object Details'] = ', '.join(parse_object_group(obj_name, config))
-        else:
-            acl_data['Source IP/Subnet'] = src
+        current = action_index + 2
 
-        # Destination
-        if dst.startswith("object-group") or dst.startswith("object"):
-            dst_obj_index = src_index + 3 if 'object' in src else src_index + 2
-            obj_name = tokens[dst_obj_index]
-            acl_data['Destination Object'] = obj_name
-            acl_data['Destination Object Details'] = ', '.join(parse_object_group(obj_name, config))
-        else:
-            acl_data['Destination IP/Subnet'] = dst
+        def parse_address():
+            nonlocal current
+            kind = tokens[current]
+            if kind == "any":
+                current += 1
+                return "any", []
+            elif kind == "host":
+                ip = tokens[current + 1] + "/32"
+                current += 2
+                return ip, []
+            elif kind == "object-group":
+                name = tokens[current + 1]
+                current += 2
+                return name, net_objects.get(name, [])
+            elif kind == "object":
+                name = tokens[current + 1]
+                current += 2
+                return name, [name]  # could be refined further
+            else:
+                ip = tokens[current]
+                mask = tokens[current + 1]
+                current += 2
+                return f"{ip}/{mask_to_cidr(mask)}", []
 
-        # Service
-        acl_data['Service Port'] = svc
+        src, src_details = parse_address()
+        dst, dst_details = parse_address()
 
-    except (ValueError, IndexError):
-        # Could not parse as expected
-        pass
+        service = ""
+        service_details = []
 
-    return acl_data
+        if current < len(tokens):
+            if tokens[current] in ["eq", "range"]:
+                service = " ".join(tokens[current:])
+                current += len(tokens) - current
+            elif tokens[current] in ["object-group", "object"]:
+                svc_type = tokens[current]
+                svc_name = tokens[current + 1]
+                service = svc_name
+                if svc_type == "object-group":
+                    service_details = svc_objects.get(svc_name, [])
+                current += 2
 
-# Function to parse the entire Cisco ASA config
-def parse_asa_config(config_file):
-    with open(config_file, 'r') as f:
-        config = f.read()
+        return {
+            "ACL Name": acl_name,
+            "Source": src,
+            "Source Details": src_details,
+            "Destination": dst,
+            "Destination Details": dst_details,
+            "Service": service,
+            "Service Details": service_details
+        }
+    except Exception as e:
+        return None
 
+
+def write_to_excel(parsed_entries, output_file):
     wb = Workbook()
     ws = wb.active
     ws.title = "Access Lists"
 
-    headers = [
-        'Access-List',
-        'Source IP/Subnet',
-        'Destination IP/Subnet',
-        'Service Port',
-        'Source Object',
-        'Source Object Details',
-        'Destination Object',
-        'Destination Object Details'
-    ]
-    ws.append(headers)
+    ws.append([
+        "ACL Name",
+        "Source",
+        "Source Details",
+        "Destination",
+        "Destination Details",
+        "Service",
+        "Service Details"
+    ])
 
-    # Parse all access-list lines
-    acl_lines = [line for line in config.splitlines() if line.strip().startswith("access-list")]
-    for line in acl_lines:
-        acl_data = parse_acl_line(line.strip(), config)
+    for entry in parsed_entries:
         ws.append([
-            acl_data.get('Access-List', ''),
-            acl_data.get('Source IP/Subnet', ''),
-            acl_data.get('Destination IP/Subnet', ''),
-            acl_data.get('Service Port', ''),
-            acl_data.get('Source Object', ''),
-            acl_data.get('Source Object Details', ''),
-            acl_data.get('Destination Object', ''),
-            acl_data.get('Destination Object Details', ''),
+            entry["ACL Name"],
+            entry["Source"],
+            ", ".join(entry["Source Details"]),
+            entry["Destination"],
+            ", ".join(entry["Destination Details"]),
+            entry["Service"],
+            ", ".join(entry["Service Details"])
         ])
 
-    # Save Excel
-    base_name = os.path.splitext(os.path.basename(config_file))[0]
-    output_file = f"{base_name}_parsed_acl.xlsx"
     wb.save(output_file)
-    print(f"Parsing complete! Excel file '{output_file}' created.")
+    print(f"Saved output to {output_file}")
 
-# Main function with CLI
+
+def parse_asa_config_file(filename):
+    with open(filename, "r") as f:
+        config = f.read()
+
+    net_objects = parse_network_object_groups(config)
+    svc_objects = parse_service_object_groups(config)
+
+    parsed = []
+    for line in config.splitlines():
+        if line.strip().startswith("access-list"):
+            entry = parse_acl_line(line, net_objects, svc_objects)
+            if entry:
+                parsed.append(entry)
+
+    base_name = os.path.splitext(os.path.basename(filename))[0]
+    output_file = f"{base_name}_parsed_acl.xlsx"
+    write_to_excel(parsed, output_file)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Parse Cisco ASA ACL config into Excel.")
+    parser = argparse.ArgumentParser(description="Parse ASA ACL config to Excel.")
     parser.add_argument("filename", help="Path to ASA config file")
     args = parser.parse_args()
 
     if not os.path.isfile(args.filename):
-        print(f"Error: File '{args.filename}' does not exist.")
+        print(f"File '{args.filename}' not found.")
         return
 
-    parse_asa_config(args.filename)
+    parse_asa_config_file(args.filename)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

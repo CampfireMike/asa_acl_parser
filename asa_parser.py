@@ -58,7 +58,7 @@ def expand_group(name, group_dict, visited=None):
         visited = set()
 
     if name in visited:
-        return []  # avoid infinite loop
+        return []  # Avoid infinite recursion
     visited.add(name)
 
     entries = []
@@ -97,7 +97,7 @@ def parse_acl_line(line, net_groups, svc_groups):
             elif kind == "object":
                 name = tokens[current + 1]
                 current += 2
-                return name, [name]  # optionally resolve actual object IPs here
+                return name, [name]
             else:
                 ip = tokens[current]
                 mask = tokens[current + 1]
@@ -111,11 +111,89 @@ def parse_acl_line(line, net_groups, svc_groups):
         service_details = []
 
         if current < len(tokens):
-            if tokens[current] in ["eq", "range"]:
+            kind = tokens[current]
+            if kind in ["eq", "range"]:
                 service = " ".join(tokens[current:])
-            elif tokens[current] == "object-group":
+            elif kind == "object-group":
                 svc_name = tokens[current + 1]
                 service = svc_name
                 service_details = expand_group(svc_name, svc_groups)
-            elif tokens[current] == "object":
-                service = tokens[current +
+            elif kind == "object":
+                service = tokens[current + 1]
+                service_details = [service]
+
+        return {
+            "ACL Name": acl_name,
+            "Source": src,
+            "Source Details": src_details,
+            "Destination": dst,
+            "Destination Details": dst_details,
+            "Service": service,
+            "Service Details": service_details
+        }
+    except Exception:
+        return None
+
+
+def write_to_excel(parsed_entries, output_file):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Access Lists"
+
+    ws.append([
+        "ACL Name",
+        "Source",
+        "Source Details",
+        "Destination",
+        "Destination Details",
+        "Service",
+        "Service Details"
+    ])
+
+    for entry in parsed_entries:
+        ws.append([
+            entry["ACL Name"],
+            entry["Source"],
+            ", ".join(entry["Source Details"]),
+            entry["Destination"],
+            ", ".join(entry["Destination Details"]),
+            entry["Service"],
+            ", ".join(entry["Service Details"])
+        ])
+
+    wb.save(output_file)
+    print(f"✅ Saved: {output_file}")
+
+
+def parse_asa_config_file(filename):
+    with open(filename, "r") as f:
+        config = f.read()
+
+    net_groups, svc_groups = parse_all_object_groups(config)
+
+    parsed = []
+    for line in config.splitlines():
+        if line.strip().startswith("access-list"):
+            entry = parse_acl_line(line, net_groups, svc_groups)
+            if entry:
+                parsed.append(entry)
+
+    base_name = os.path.splitext(os.path.basename(filename))[0]
+    output_file = f"{base_name}_parsed_acl.xlsx"
+    write_to_excel(parsed, output_file)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Parse ASA ACL config to Excel.")
+    parser.add_argument("filename", help="Path to ASA config file")
+    args = parser.parse_args()
+
+    if not os.path.isfile(args.filename):
+        print(f"❌ File '{args.filename}' not found.")
+        return
+
+    parse_asa_config_file(args.filename)
+
+
+if __name__ == "__main__":
+    main()
